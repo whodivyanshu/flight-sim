@@ -1,5 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Vector3 } from 'three'
 import { game, useGame, WIND_FROM, WIND_SPEEDS } from '../game/game'
+import { runwayFocus } from '../game/look'
 import type { AircraftSpec } from '../sim/aircraft'
 import { type Controls, DUMP_FLOOR, type FlightSim } from '../sim/flight-sim'
 import { AIRPORTS, outside } from '../world/island'
@@ -1076,6 +1078,49 @@ function Notices({ spec }: { spec: AircraftSpec }) {
   )
 }
 
+// Milliseconds the look-around help stays up after the view last moved
+const LOOK_HINT_TIME = 4000
+const touchdown = new Vector3()
+
+/**
+ * One line of help about the view: which runway it is watching, or for a while after the
+ * mouse turns it, how to look ahead again.
+ */
+function LookHint() {
+  const box = useRef<HTMLParagraphElement>(null)
+  const last = useRef('')
+  const hideAt = useRef(0)
+  useTelemetry(
+    useCallback((sim: FlightSim) => {
+      if (!box.current) return
+      const { look } = game
+      let text = ''
+      if (game.getState().status === 'flying' && !game.getState().bombsight) {
+        const where = `${look.yaw} ${look.pitch} ${look.distance} ${look.fov}`
+        if (where !== last.current) {
+          last.current = where
+          hideAt.current = performance.now() + LOOK_HINT_TIME
+        }
+        if (look.focus === 'runway') {
+          const end = runwayFocus(sim.position.x, sim.position.z, game.nav.approach, touchdown)
+          text = `Watching runway ${end.designator} at ${end.airport.code}. Press / to look ahead`
+        } else if (look.focus === 'free' && look.moved && performance.now() < hideAt.current)
+          text = 'Double-click to look ahead again'
+      }
+      setText(box.current, text)
+      box.current.hidden = text === ''
+    }, [])
+  )
+  return (
+    <p
+      ref={box}
+      role="status"
+      hidden
+      className="bg-ink/60 text-marking/90 rounded-full px-3 py-0.5 text-sm"
+    />
+  )
+}
+
 /** Holds the glass screens, which go dark while the aircraft has no electrical power. */
 function GlassScreens({ children }: { children: ReactNode }) {
   const box = useRef<HTMLDivElement>(null)
@@ -1122,6 +1167,7 @@ export function Hud() {
         {camera === 'chase' && !bombsight && <BankIndicator />}
         <GpwsAlert />
         <Notices spec={spec} />
+        <LookHint />
       </div>
       {/* Steps and coaching sit to the left, clear of the view ahead */}
       <div className="absolute top-4 left-4 flex flex-col gap-2">

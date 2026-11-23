@@ -96,6 +96,12 @@ const CONTROLS: { title: string; rows: [keys: string[], action: string][] }[] = 
     title: 'View',
     rows: [
       [['C'], 'Switch between chase and cockpit view'],
+      [
+        ['Drag'],
+        'Look around with the mouse: circle the aircraft, or turn your head in the cockpit. Double-click to look ahead again'
+      ],
+      [['Wheel'], 'Zoom the view in or out'],
+      [['/'], 'Keep the view on the runway, for the turn onto final. Press again to look ahead'],
       [['M'], 'Enlarge, then hide the map'],
       [['`'], 'Photo mode: freeze the flight, hide the panels, and move a free camera'],
       [['Esc'], 'Pause']

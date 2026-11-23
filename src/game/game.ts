@@ -18,6 +18,7 @@ import { findCollision } from './collision'
 import { AirCombat, type CombatEvent } from './combat'
 import { Effects } from './effects'
 import { Gpws } from './gpws'
+import { Look } from './look'
 import {
   combatSetup,
   type Mission,
@@ -169,6 +170,8 @@ class Game {
   /** The B-2's bomb bay on bombing missions; empty otherwise. */
   readonly bombs = new Bombs()
   readonly combat = new AirCombat()
+  /** Where the player has turned the view with the mouse. */
+  readonly look = new Look()
   // A won bombing mission waiting for its last explosion to play out
   private won: { result: MissionResult; left: number } | null = null
   private readonly lastBlast = new Vector3()
@@ -486,7 +489,11 @@ class Game {
     this.setState({ bombsight: !open })
   }
 
-  toggleCamera = () => this.change({ camera: this.state.camera === 'chase' ? 'cockpit' : 'chase' })
+  /** Switches between the chase and cockpit views, each starting out looking ahead. */
+  toggleCamera = () => {
+    this.look.reset()
+    this.change({ camera: this.state.camera === 'chase' ? 'cockpit' : 'chase' })
+  }
   toggleMap = () => {
     const next = { small: 'large', large: 'hidden', hidden: 'small' } as const
     this.change({ map: next[this.state.map] })
@@ -640,7 +647,11 @@ class Game {
       if (event.code === 'Space' && fighting && !event.repeat) this.combat.dropFlares(this.sim)
       if (event.code === 'KeyC' && !event.repeat) this.toggleCamera()
       else if (event.code === 'KeyM' && !event.repeat) this.toggleMap()
-      else if (event.code === 'KeyN' && !event.repeat) {
+      else if (event.code === 'Slash') {
+        // Firefox opens its quick find on this key unless the page takes it
+        event.preventDefault()
+        if (!event.repeat) this.look.toggleRunway()
+      } else if (event.code === 'KeyN' && !event.repeat) {
         if (event.shiftKey) this.nav.select(null, this.sim)
         else this.nav.cycle(this.sim, WIND_FROM)
         this.pilot.flyApproach(false, this.sim, this.nav)
@@ -915,6 +926,7 @@ class Game {
     this.combat.clear()
     this.rippleHeld = false
     this.pilot.releaseAll()
+    this.look.reset()
     this.gpws.reset(this.sim)
     this.storm.reset()
     this.nav.load(null, this.sim)

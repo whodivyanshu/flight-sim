@@ -1,7 +1,8 @@
 import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
-import { type PerspectiveCamera, Vector3 } from 'three'
+import { type PerspectiveCamera, Quaternion, Vector3 } from 'three'
 import { game, useGame } from '../game/game'
+import { type LookView, runwayFocus } from '../game/look'
 import { heightAt } from '../world/island'
 
 const FORWARD = new Vector3(0, 0, -1)
@@ -9,6 +10,7 @@ const FORWARD = new Vector3(0, 0, -1)
 export const COCKPIT_FOV = 68
 /** Pixels the view is shifted up so the horizon clears the instrument panel. */
 export const horizonShift = (height: number) => Math.min(90, height * 0.11)
+const CHASE_FOV = 58
 // The chase camera looks this many aircraft-distances past the nose,
 // so the runway stays visible on approach
 const CHASE_LOOK_AHEAD = 1.9
@@ -32,12 +34,23 @@ const HOVER_PULL = 0.15
 const HOVER_LOOK_DROP = 8
 // Radians the pilot looks down in a hover, toward the pad past the nose
 const HOVER_LOOK_DOWN = 0.38
+// The chase camera circles no lower or higher than this, in radians from level, so it never
+// turns over the top
+const ORBIT_LOWEST = -1.3
+const ORBIT_HIGHEST = 1.45
+// Pixels per line and per page of wheel scroll, for mice that scroll by lines
+const WHEEL_LINE = 33
+const WHEEL_PAGE = 800
 const forward = new Vector3()
 const target = new Vector3()
 const goal = new Vector3()
-const look = new Vector3()
+const aim = new Vector3()
 const ahead = new Vector3()
 const below = new Vector3()
+const offset = new Vector3()
+const runway = new Vector3()
+const subject = new Vector3()
+const inverse = new Quaternion()
 
 const viewers = new Set<(camera: PerspectiveCamera) => void>()
 
@@ -80,18 +93,22 @@ export function CameraRig() {
     return () => camera.clearViewOffset()
   }, [camera, size])
 
-  useEffect(() => {
-    camera.fov = bombsight ? SIGHT_FOV : mode === 'cockpit' ? COCKPIT_FOV : 58
-    camera.updateProjectionMatrix()
-  }, [camera, mode, bombsight])
+  useLookControls()
 
   useFrame((_, delta) => {
     // The free camera of photo mode has the view until it closes
     if (game.getState().photo) return
-    const { sim, wreck, effects, bombs } = game
+    const { sim, wreck, effects, bombs, look } = game
     const view = sim.spec.camera
     const circle = orbit.current
     const blast = game.blastReplay
+    // The wheel zooms the cockpit view, but not the circle round a wreck or a blast
+    const zoom = wreck.active || blast ? 1 : look.fov
+    const fov = bombsight ? SIGHT_FOV : mode === 'cockpit' ? COCKPIT_FOV * zoom : CHASE_FOV
+    if (camera.fov !== fov) {
+      camera.fov = fov
+      camera.updateProjectionMatrix()
+    }
     const slow = sim.spec.rotor
       ? 1 - smoothstep(HOVER_VIEW_FROM, HOVER_VIEW_TO, sim.groundSpeed)
       : 0
@@ -137,8 +154,8 @@ export function CameraRig() {
       if (!sight.current) sight.current = wanted.clone()
       else sight.current.lerp(wanted, 1 - Math.exp(-delta * 4))
       // Pitch down to the sight point without rolling, so the track stays at the top
-      look.copy(sight.current).sub(camera.position).normalize()
-      const down = Math.max(0, -look.y)
+      aim.copy(sight.current).sub(camera.position).normalize()
+      const down = Math.max(0, -aim.y)
       camera.up
         .set(0, 1, 0)
         .multiplyScalar(Math.sqrt(1 - down * down))
@@ -148,21 +165,39 @@ export function CameraRig() {
       sight.current = null
       circle.started = false
       camera.position.copy(view.eye).applyQuaternion(sim.orientation).add(sim.position)
+      // Watching the runway: turn the head to it, wherever it is around the aircraft
+      if (look.focus === 'runway') {
+        runwayFocus(sim.position.x, sim.position.z, game.nav.approach, runway)
+        aim.copy(runway).sub(camera.position)
+        aim.applyQuaternion(inverse.copy(sim.orientation).invert())
+        look.update(delta, 'cockpit', {
+          yaw: Math.atan2(-aim.x, -aim.z),
+          pitch: Math.atan2(aim.y, Math.hypot(aim.x, aim.z)) + hover * HOVER_LOOK_DOWN
+        })
+      } else look.update(delta, 'cockpit')
       camera.quaternion.copy(sim.orientation)
-      if (hover > 0.001) camera.rotateX(-hover * HOVER_LOOK_DOWN)
+      camera.rotateY(look.yaw)
+      camera.rotateX(look.pitch - hover * HOVER_LOOK_DOWN)
     } else {
       sight.current = null
       circle.started = false
-      // The camera swings behind the nose with a short lag.
-      // It follows only part of the pitch, so it stays above the tail in a climb or flare.
-      forward.copy(FORWARD).applyQuaternion(sim.orientation)
+      look.update(delta, 'chase')
+      // The camera swings behind the nose with a short lag, or watching the runway, round to
+      // the far side of the aircraft from it. It follows only part of the climb or descent,
+      // so it stays above the tail in a climb or flare.
+      if (look.focus === 'runway') {
+        runwayFocus(sim.position.x, sim.position.z, game.nav.approach, forward)
+        forward.sub(sim.position)
+      } else forward.copy(FORWARD).applyQuaternion(sim.orientation)
       forward.y *= 0.4
+      if (forward.lengthSq() < 1e-6) forward.copy(trail.current)
       trail.current.lerp(forward.normalize(), 1 - Math.exp(-delta * 4)).normalize()
-      const back = view.distance * (1 - hover * HOVER_PULL)
-      camera.position.copy(sim.position).addScaledVector(trail.current, -back)
-      camera.position.y += view.height + hover * HOVER_RISE
-      keepAboveGround(camera.position, 1.2)
-      target.copy(sim.position).addScaledVector(trail.current, view.distance * CHASE_LOOK_AHEAD)
+      const back = view.distance * (1 - hover * HOVER_PULL) * look.distance
+      offset.copy(trail.current).multiplyScalar(-back)
+      offset.y += (view.height + hover * HOVER_RISE) * look.distance
+      target
+        .copy(sim.position)
+        .addScaledVector(trail.current, view.distance * look.distance * CHASE_LOOK_AHEAD)
       target.y += 1
       // A slow helicopter's camera looks down at the pad or ground under it instead
       if (hover > 0.001) {
@@ -170,8 +205,33 @@ export function CameraRig() {
         below.y -= Math.min(Math.max(sim.altitudeAgl, 0), HOVER_LOOK_DROP)
         target.lerp(below, hover)
       }
+      subject.copy(sim.position)
+      subject.y += 1
+      // How far above the aircraft the normal view aims, in radians. The camera, the aircraft
+      // and the point it aims at all lie in one upright plane, so this is the whole difference.
+      aim.copy(sim.position).add(offset)
+      const lift = elevation(aim, target) - elevation(aim, subject)
+      // Dragging circles the camera round the aircraft, and up over it or down below it
+      if (look.yaw !== 0 || look.pitch !== 0) {
+        const reach = offset.length()
+        const turn = Math.atan2(offset.x, offset.z) + look.yaw
+        const tilt = Math.atan2(offset.y, Math.hypot(offset.x, offset.z)) - look.pitch
+        const height = Math.min(Math.max(tilt, ORBIT_LOWEST), ORBIT_HIGHEST)
+        offset
+          .set(
+            Math.sin(turn) * Math.cos(height),
+            Math.sin(height),
+            Math.cos(turn) * Math.cos(height)
+          )
+          .multiplyScalar(reach)
+      }
+      camera.position.copy(sim.position).add(offset)
+      keepAboveGround(camera.position, 1.2)
+      // As the camera circles, the aircraft holds its place on screen, as in the normal view:
+      // aim at it, then tilt up by as much as the normal view aims above it
       camera.up.set(0, 1, 0)
-      camera.lookAt(target)
+      camera.lookAt(subject)
+      camera.rotateX(lift)
     }
 
     // The blast of a crash shakes the view
@@ -184,6 +244,77 @@ export function CameraRig() {
     for (const viewer of viewers) viewer(camera)
   })
   return null
+}
+
+/**
+ * Mouse controls for looking around while flying. Dragging on the view turns it, the wheel
+ * zooms, and a double-click looks ahead again. Photo mode and the bombsight keep the mouse.
+ */
+function useLookControls() {
+  const canvas = useThree(state => state.gl.domElement)
+  useEffect(() => {
+    // A finger dragging on a touch screen looks around too, rather than scrolling the page
+    canvas.style.touchAction = 'none'
+    // The mouse position while dragging, or null
+    let drag: { x: number; y: number } | null = null
+    const looking = () => {
+      const { photo, bombsight, status } = game.getState()
+      return !photo && !bombsight && status !== 'crashed' && !game.wreck.active
+    }
+    const view = (): LookView => game.getState().camera
+    const pointerDown = (event: PointerEvent) => {
+      if (event.button !== 0 || !looking()) return
+      drag = { x: event.clientX, y: event.clientY }
+      canvas.setPointerCapture(event.pointerId)
+      canvas.style.cursor = 'grabbing'
+    }
+    const pointerMove = (event: PointerEvent) => {
+      if (!drag) return
+      if (looking()) game.look.drag(event.clientX - drag.x, event.clientY - drag.y, view())
+      drag.x = event.clientX
+      drag.y = event.clientY
+    }
+    const pointerUp = () => {
+      if (!drag) return
+      drag = null
+      canvas.style.cursor = ''
+    }
+    const doubleClick = () => {
+      if (looking()) game.look.lookAhead()
+    }
+    const wheel = (event: WheelEvent) => {
+      if (!looking()) return
+      event.preventDefault()
+      const pixels =
+        event.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? WHEEL_LINE
+          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? WHEEL_PAGE
+            : 1
+      game.look.zoom(event.deltaY * pixels, view())
+    }
+    canvas.addEventListener('pointerdown', pointerDown)
+    canvas.addEventListener('pointermove', pointerMove)
+    canvas.addEventListener('pointerup', pointerUp)
+    canvas.addEventListener('pointercancel', pointerUp)
+    canvas.addEventListener('lostpointercapture', pointerUp)
+    canvas.addEventListener('dblclick', doubleClick)
+    canvas.addEventListener('wheel', wheel, { passive: false })
+    return () => {
+      canvas.removeEventListener('pointerdown', pointerDown)
+      canvas.removeEventListener('pointermove', pointerMove)
+      canvas.removeEventListener('pointerup', pointerUp)
+      canvas.removeEventListener('pointercancel', pointerUp)
+      canvas.removeEventListener('lostpointercapture', pointerUp)
+      canvas.removeEventListener('dblclick', doubleClick)
+      canvas.removeEventListener('wheel', wheel)
+    }
+  }, [canvas])
+}
+
+/** Radians above level that `to` lies, seen from `from`. */
+function elevation(from: Vector3, to: Vector3) {
+  return Math.atan2(to.y - from.y, Math.hypot(to.x - from.x, to.z - from.z))
 }
 
 function keepAboveGround(position: Vector3, clearance: number) {

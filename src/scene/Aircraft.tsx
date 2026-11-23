@@ -36,6 +36,8 @@ const RUDDER_TRAVEL = 0.45
 const FLAP_TRAVEL = 0.6
 const AIRBRAKE_TRAVEL = 1
 
+// Radians the pilot turns their head before the airframe outside comes into sight
+const LOOKING_OUT = 0.5
 // Colours the paint burns to after a crash on land
 const SOOT = new Color('#3a3733')
 
@@ -96,9 +98,15 @@ function useAirframe(spec: AircraftSpec, body: string, accent: string): Airframe
     } else {
       root.current.position.copy(sim.position)
       root.current.quaternion.copy(sim.orientation)
-      // The bombsight looks out from under the belly, past where the airframe would be
+      // The bombsight looks out from under the belly, past where the airframe would be.
+      // From the seat, the wings and engines come into sight as the pilot looks out to the
+      // side, except in the B-2, whose seat sits inside its double-sided skin.
       const { camera, bombsight } = game.getState()
-      root.current.visible = camera === 'chase' && !bombsight
+      const lookingOut =
+        camera === 'cockpit' &&
+        Math.abs(game.look.yaw) > LOOKING_OUT &&
+        spec.shape.type !== 'bomber'
+      root.current.visible = (camera === 'chase' || lookingOut) && !bombsight
       parts.current.forEach((part, i) => {
         part?.position.copy(spec.breakup[i].rest)
         part?.quaternion.identity()

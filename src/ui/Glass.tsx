@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Quaternion, Vector3 } from 'three'
 import { game, useGame } from '../game/game'
 import { WARNINGS } from '../game/gpws'
-import { COCKPIT_FOV, horizonShift } from '../scene/CameraRig'
+import { COCKPIT_FOV, horizonShift, onCameraMoved } from '../scene/CameraRig'
 import type { AircraftSpec } from '../sim/aircraft'
 import type { Controls, EngineState, FlightSim } from '../sim/flight-sim'
 import { AIRPORTS } from '../world/island'
@@ -573,11 +573,18 @@ export function EngineDisplay({ spec }: { spec: AircraftSpec }) {
 
 const bodyVelocity = new Vector3()
 const inverse = new Quaternion()
+const nose = new Vector3()
+const viewDirection = new Vector3()
+const onScreen = new Vector3()
+// The display hides once the nose is this far off to the side of the view, as a cosine
+const HUD_HIDES = 0.3
 const LADDER = Array.from({ length: 35 }, (_, i) => (i - 17) * 5).filter(pitch => pitch !== 0)
 
 /**
  * Fighter head-up display, drawn over the cockpit view. The pitch ladder lines up with
- * the real horizon, and the circle marks where the aircraft is actually going.
+ * the real horizon, and the circle marks where the aircraft is actually going. The glass
+ * stays fixed to the aircraft, so it slides away as the pilot looks around and grows as
+ * the view zooms in.
  */
 export function HeadUpDisplay({ spec }: { spec: AircraftSpec }) {
   const camera = useGame(state => state.camera)
@@ -588,6 +595,7 @@ export function HeadUpDisplay({ spec }: { spec: AircraftSpec }) {
     window.addEventListener('resize', update)
     return () => window.removeEventListener('resize', update)
   }, [])
+  const glass = useRef<SVGGElement>(null)
   const ladder = useRef<SVGGElement>(null)
   const path = useRef<SVGGElement>(null)
   const speed = useRef<SVGTextElement>(null)
@@ -599,6 +607,30 @@ export function HeadUpDisplay({ spec }: { spec: AircraftSpec }) {
   const centerX = size.width / 2
   const centerY = size.height / 2 - horizonShift(size.height)
   const perDegree = (size.height / 2 / Math.tan((COCKPIT_FOV * Math.PI) / 360)) * (Math.PI / 180)
+
+  // Moves the whole display to wherever the nose is on screen, scaled with the zoom
+  useEffect(
+    () =>
+      onCameraMoved(view => {
+        const element = glass.current
+        if (!element) return
+        nose.set(0, 0, -1).applyQuaternion(game.sim.orientation)
+        if (nose.dot(view.getWorldDirection(viewDirection)) < HUD_HIDES) {
+          element.setAttribute('visibility', 'hidden')
+          return
+        }
+        onScreen.copy(view.position).addScaledVector(nose, 1000).project(view)
+        const x = ((onScreen.x + 1) / 2) * size.width
+        const y = ((1 - onScreen.y) / 2) * size.height
+        const scale = Math.tan((COCKPIT_FOV * Math.PI) / 360) / Math.tan((view.fov * Math.PI) / 360)
+        element.setAttribute('visibility', 'visible')
+        element.setAttribute(
+          'transform',
+          `translate(${(x - centerX * scale).toFixed(1)} ${(y - centerY * scale).toFixed(1)}) scale(${scale.toFixed(4)})`
+        )
+      }),
+    [size, centerX, centerY]
+  )
 
   useTelemetry(
     useCallback(
@@ -645,60 +677,62 @@ export function HeadUpDisplay({ spec }: { spec: AircraftSpec }) {
       role="img"
     >
       <title>Head-up display</title>
-      <clipPath id="hud-glass">
-        <circle cx={centerX} cy={centerY} r={reach} />
-      </clipPath>
-      <g clipPath="url(#hud-glass)">
-        <g ref={ladder} strokeWidth="1.6">
-          <line x1={-size.width} x2={size.width} />
-          {LADDER.map(pitch => (
-            <g key={pitch} transform={`translate(0 ${-pitch * perDegree})`}>
-              {/* Solid bars above the horizon, dashed below it */}
-              <path
-                d={`M -90 ${pitch > 0 ? 8 : -8} V 0 H -34 M 90 ${pitch > 0 ? 8 : -8} V 0 H 34`}
-                fill="none"
-                strokeDasharray={pitch < 0 ? '9 6' : undefined}
-              />
-              <text x="98" y="6" stroke="none">
-                {Math.abs(pitch)}
-              </text>
-            </g>
-          ))}
+      <g ref={glass}>
+        <clipPath id="hud-glass">
+          <circle cx={centerX} cy={centerY} r={reach} />
+        </clipPath>
+        <g clipPath="url(#hud-glass)">
+          <g ref={ladder} strokeWidth="1.6">
+            <line x1={-size.width} x2={size.width} />
+            {LADDER.map(pitch => (
+              <g key={pitch} transform={`translate(0 ${-pitch * perDegree})`}>
+                {/* Solid bars above the horizon, dashed below it */}
+                <path
+                  d={`M -90 ${pitch > 0 ? 8 : -8} V 0 H -34 M 90 ${pitch > 0 ? 8 : -8} V 0 H 34`}
+                  fill="none"
+                  strokeDasharray={pitch < 0 ? '9 6' : undefined}
+                />
+                <text x="98" y="6" stroke="none">
+                  {Math.abs(pitch)}
+                </text>
+              </g>
+            ))}
+          </g>
+          <g ref={path} fill="none" strokeWidth="2">
+            <circle r="9" />
+            <path d="M -9 0 H -26 M 9 0 H 26 M 0 -9 V -18" />
+          </g>
         </g>
-        <g ref={path} fill="none" strokeWidth="2">
-          <circle r="9" />
-          <path d="M -9 0 H -26 M 9 0 H 26 M 0 -9 V -18" />
-        </g>
-      </g>
-      {/* The cross marks the aircraft's nose */}
-      <path
-        d={`M ${centerX - 10} ${centerY} H ${centerX + 10} M ${centerX} ${centerY - 10} V ${centerY + 10}`}
-        strokeWidth="1.6"
-      />
-      <g stroke="none" fontSize="22">
-        <rect
-          x={centerX - reach - 78}
-          y={centerY - 16}
-          width="74"
-          height="32"
-          fill="none"
-          stroke={GREEN}
+        {/* The cross marks the aircraft's nose */}
+        <path
+          d={`M ${centerX - 10} ${centerY} H ${centerX + 10} M ${centerX} ${centerY - 10} V ${centerY + 10}`}
           strokeWidth="1.6"
         />
-        <text ref={speed} x={centerX - reach - 12} y={centerY + 8} textAnchor="end" />
-        <rect
-          x={centerX + reach + 4}
-          y={centerY - 16}
-          width="92"
-          height="32"
-          fill="none"
-          stroke={GREEN}
-          strokeWidth="1.6"
-        />
-        <text ref={altitude} x={centerX + reach + 88} y={centerY + 8} textAnchor="end" />
-        <text ref={heading} x={centerX} y={centerY - reach - 10} textAnchor="middle" />
+        <g stroke="none" fontSize="22">
+          <rect
+            x={centerX - reach - 78}
+            y={centerY - 16}
+            width="74"
+            height="32"
+            fill="none"
+            stroke={GREEN}
+            strokeWidth="1.6"
+          />
+          <text ref={speed} x={centerX - reach - 12} y={centerY + 8} textAnchor="end" />
+          <rect
+            x={centerX + reach + 4}
+            y={centerY - 16}
+            width="92"
+            height="32"
+            fill="none"
+            stroke={GREEN}
+            strokeWidth="1.6"
+          />
+          <text ref={altitude} x={centerX + reach + 88} y={centerY + 8} textAnchor="end" />
+          <text ref={heading} x={centerX} y={centerY - reach - 10} textAnchor="middle" />
+        </g>
+        <text ref={data} x={centerX - reach - 78} y={centerY + reach * 0.75} stroke="none" />
       </g>
-      <text ref={data} x={centerX - reach - 78} y={centerY + reach * 0.75} stroke="none" />
     </svg>
   )
 }
